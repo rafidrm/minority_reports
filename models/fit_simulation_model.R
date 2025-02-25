@@ -3,6 +3,7 @@ data_file <- args[1]
 predictors <- args[2]  # comma-separated list of q_* columns
 output_dir <- args[3]
 temp_dir <- args[4]  # experiment-specific temp directory
+dataset <- args[5]   # ECPD or ZOD
 
 if(!dir.exists(output_dir)){
   dir.create(output_dir, recursive=TRUE)
@@ -27,15 +28,21 @@ observation_weights <- ifelse(df$disagree == 1,
                             class_weights[2], 
                             class_weights[1])
 
-# Build formula: disagree ~ 1 + <predictors> + (1|user_id) + (1|crop_id)
-form_str <- "disagree ~ 1"
-if(predictors != ""){
-  # Split the comma-separated predictors and join with ' + '
-  pred_list <- unlist(strsplit(predictors, ","))
-  pred_str <- paste(pred_list, collapse=" + ")
-  form_str <- paste(form_str, "+", pred_str)
+# Build formula based on dataset
+if(dataset == "ECPD") {
+    # For ECPD: include predictors if available
+    form_str <- "disagree ~ 1"
+    if(predictors != ""){
+        # Split the comma-separated predictors and join with ' + '
+        pred_list <- unlist(strsplit(predictors, ","))
+        pred_str <- paste(pred_list, collapse=" + ")
+        form_str <- paste(form_str, "+", pred_str)
+    }
+    form_str <- paste(form_str, "+ (1|user_id) + (1|crop_id)")
+} else {
+    # For ZOD: only random effects
+    form_str <- "disagree ~ 1 + (1|user_id) + (1|crop_id)"
 }
-form_str <- paste(form_str, "+ (1|user_id) + (1|crop_id)")
 formula <- as.formula(form_str)
 
 # Print class weight information
@@ -43,6 +50,10 @@ cat("\nClass weights applied:")
 cat("\nClass 0 (majority):", class_weights[1])
 cat("\nClass 1 (minority):", class_weights[2])
 cat("\n")
+
+# Print formula being used
+cat("\nFitting model with formula:\n")
+cat(deparse(formula), "\n")
 
 # Fit the model using glmer with weights
 model <- glmer(formula, 

@@ -105,9 +105,29 @@ Options:
 - `--initial_training_hours`: Initial training period length (default: 24)
 - `--recalibration_frequency_hours`: How often to recalibrate model (default: 6)
 - `--prune_threshold`: Probability threshold for pruning (default: 0.1)
-- `--pruning_strategy`: Pruning strategy to use (default: 'default')
+- `--pruning_strategy`: Strategy for pruning tasks:
+  - `default`: Protects first instance of each worker, task, crop, and question
+  - `allow_workers`: Protects first instance of each task, crop, and question (but allows pruning new workers)
 - `--experiment_name`: Name for the experiment
 - `--debug`: Run in debug mode with reduced dataset
+
+### Pruning Strategies
+
+The simulation supports different strategies for determining which instances are eligible for pruning:
+
+1. **Default Strategy**
+   - First instance of a worker is never pruned
+   - First instance of a task is never pruned
+   - First instance of a crop is never pruned
+   - First instance of a question type is never pruned
+   - Otherwise, prune if predicted probability ≥ threshold
+
+2. **Allow Workers Strategy**
+   - First instance of a task is never pruned
+   - First instance of a crop is never pruned
+   - First instance of a question type is never pruned
+   - New workers can be pruned immediately
+   - Otherwise, prune if predicted probability ≥ threshold
 
 ### Analyzing Results
 

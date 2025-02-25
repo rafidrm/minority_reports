@@ -87,20 +87,28 @@ def undersample_with_correction(df, minority_col='disagree', random_state=42):
 def fit_simulation_model(training_df, dataset='ECPD', output_dir='results/ECPD/simulation/parameters'):
     """
     Fit the simulation model by calling an R script.
-    Uses only the one-hot encoded question columns (q_*) along with user_id and crop_id.
+    For ECPD: Uses one-hot encoded question columns (q_*) along with user_id and crop_id.
+    For ZOD: Uses only user_id and crop_id as random effects.
     Saves the model outputs in output_dir and returns a SimulationModel instance.
     """
     # Create experiment-specific temp directory
     temp_dir = Path(output_dir).parent / 'temp'
     temp_dir.mkdir(exist_ok=True)
     
-    # Identify all q_ columns and which ones are active/inactive
-    q_cols = [col for col in training_df.columns if col.startswith('q_')]
-    active_q_cols = [col for col in q_cols if training_df[col].sum() > 0]
-    inactive_q_cols = list(set(q_cols) - set(active_q_cols))
-    
-    # Keep all columns for consistency in predictions, but only use active ones for fitting
-    cols_to_keep = ['disagree', 'user_id', 'crop_id'] + q_cols
+    if dataset == 'ECPD':
+        # Identify all q_ columns and which ones are active/inactive
+        q_cols = [col for col in training_df.columns if col.startswith('q_')]
+        active_q_cols = [col for col in q_cols if training_df[col].sum() > 0]
+        inactive_q_cols = list(set(q_cols) - set(active_q_cols))
+        
+        # Keep all columns for consistency in predictions
+        cols_to_keep = ['disagree', 'user_id', 'crop_id'] + q_cols
+    else:  # ZOD
+        # No question columns for ZOD
+        q_cols = []
+        active_q_cols = []
+        inactive_q_cols = []
+        cols_to_keep = ['disagree', 'user_id', 'crop_id']
     
     # Create a copy for model fitting that will be undersampled with correction
     model_training_data = training_df[cols_to_keep].copy()
@@ -112,13 +120,15 @@ def fit_simulation_model(training_df, dataset='ECPD', output_dir='results/ECPD/s
     
     orig_disagree = training_df['disagree'].value_counts()
     corr_disagree = model_training_data['disagree'].value_counts()
-    orig_active = len([col for col in q_cols if training_df[col].sum() > 0])
-    corr_active = len([col for col in q_cols if model_training_data[col].sum() > 0])
+    
+    if dataset == 'ECPD':
+        orig_active = len([col for col in q_cols if training_df[col].sum() > 0])
+        corr_active = len([col for col in q_cols if model_training_data[col].sum() > 0])
+        print(f"Active questions: {orig_active} → {corr_active}")
     
     print(f"Class balance (0:1): {orig_disagree[0]}:{orig_disagree[1]} → {corr_disagree[0]}:{corr_disagree[1]}")
     print(f"Unique workers: {training_df['user_id'].nunique()} → {model_training_data['user_id'].nunique()}")
     print(f"Unique crops: {training_df['crop_id'].nunique()} → {model_training_data['crop_id'].nunique()}")
-    print(f"Active questions: {orig_active} → {corr_active}")
     
     # Verify we have variation in the response
     if model_training_data['disagree'].nunique() <= 1:
@@ -133,7 +143,7 @@ def fit_simulation_model(training_df, dataset='ECPD', output_dir='results/ECPD/s
     
     # Call the R script (located in models/)
     r_script = os.path.join(os.path.dirname(__file__), 'fit_simulation_model.R')
-    cmd = ['Rscript', r_script, str(temp_csv), predictors, output_dir, str(temp_dir)]
+    cmd = ['Rscript', r_script, str(temp_csv), predictors, output_dir, str(temp_dir), dataset]
     subprocess.run(cmd, check=True)
     
     # Read outputs produced by the R script
@@ -142,14 +152,21 @@ def fit_simulation_model(training_df, dataset='ECPD', output_dir='results/ECPD/s
     worker_effects_file = out_dir / 'worker_effects_simulation.csv'
     crop_effects_file = out_dir / 'crop_effects_simulation.csv'
     
-    # Read the fixed effects and add zero coefficients for inactive columns
-    fixed_effects_df = pd.read_csv(fixed_effects_file, index_col=0)
-    fixed_effects = fixed_effects_df['coef'].to_dict()
-    
-    # Add zero coefficients for inactive question columns
-    for col in inactive_q_cols:
-        fixed_effects[col] = 0.0
-        print(f"Added zero coefficient for inactive column: {col}")
+    if dataset == 'ECPD':
+        # Read the fixed effects and add zero coefficients for inactive columns
+        fixed_effects_df = pd.read_csv(fixed_effects_file, index_col=0)
+        fixed_effects = fixed_effects_df['coef'].to_dict()
+        
+        # Add zero coefficients for inactive question columns
+        for col in inactive_q_cols:
+            fixed_effects[col] = 0.0
+            print(f"Added zero coefficient for inactive column: {col}")
+    else:  # ZOD
+        # For ZOD, only intercept in fixed effects
+        fixed_effects = {'Intercept': 0.0}  # Will be overwritten by actual value from R
+        if fixed_effects_file.exists():
+            fixed_effects_df = pd.read_csv(fixed_effects_file, index_col=0)
+            fixed_effects = fixed_effects_df['coef'].to_dict()
     
     worker_effects_df = pd.read_csv(worker_effects_file)
     worker_effects = dict(zip(worker_effects_df['worker_id'], worker_effects_df['effect']))
@@ -162,32 +179,40 @@ def fit_simulation_model(training_df, dataset='ECPD', output_dir='results/ECPD/s
     
     return SimulationModel(fixed_effects, worker_effects, crop_effects)
 
-def predict_simulation_proba(test_df, sim_model):
+def predict_simulation_proba(test_df, sim_model, dataset='ECPD'):
     """
-    Predict probabilities for test_df using the fitted simulation model.
-    Computes the linear predictor:
-       lp = Intercept + sum_{q in q_cols} (beta_q * q_value) + (worker_RE) + (crop_RE)
-    Then applies the logistic transformation.
+    Predict disagreement probabilities for test data using simulation model.
     
-    For any new worker or crop (not found in the model), the corresponding RE is assumed 0.
-    Returns a pandas Series of predicted probabilities.
+    Args:
+        test_df: DataFrame of test instances
+        sim_model: SimulationModel instance
+        dataset: Dataset being processed ('ECPD' or 'ZOD')
+    
+    Returns:
+        Array of predicted probabilities
     """
-    q_cols = [col for col in test_df.columns if col.startswith('q_')]
-    intercept = sim_model.fixed_effects.get('Intercept', 0)
+    # Get fixed effects for active columns
+    if dataset == 'ECPD':
+        # For ECPD: Include question effects
+        q_cols = [col for col in test_df.columns if col.startswith('q_')]
+        fixed_effects = np.array([sim_model.fixed_effects.get(col, 0.0) for col in q_cols])
+        q_matrix = test_df[q_cols].values
+        fixed_component = q_matrix @ fixed_effects
+    else:
+        # For ZOD: Only intercept
+        fixed_component = np.zeros(len(test_df))
     
-    lin_preds = []
-    for idx, row in test_df.iterrows():
-        fixed_sum = 0
-        for col in q_cols:
-            beta = sim_model.fixed_effects.get(col, 0)
-            fixed_sum += beta * row.get(col, 0)
-        lp = intercept + fixed_sum
-        worker = row['user_id']
-        crop = row['crop_id']
-        lp += sim_model.worker_effects.get(worker, 0)
-        lp += sim_model.crop_effects.get(crop, 0)
-        lin_preds.append(lp)
+    # Add intercept
+    fixed_component += sim_model.fixed_effects.get('Intercept', 0.0)
     
-    lin_preds = np.array(lin_preds)
-    proba = expit(lin_preds)  # logistic function 1 / (1 + exp(-x))
-    return pd.Series(proba, index=test_df.index) 
+    # Add random effects
+    worker_effects = np.array([sim_model.worker_effects.get(str(w), 0.0) 
+                             for w in test_df['user_id']])
+    crop_effects = np.array([sim_model.crop_effects.get(str(c), 0.0) 
+                           for c in test_df['crop_id']])
+    
+    # Combine all effects
+    logits = fixed_component + worker_effects + crop_effects
+    
+    # Convert to probabilities using scipy's expit (logistic function)
+    return expit(logits) 
