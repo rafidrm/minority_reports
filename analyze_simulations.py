@@ -17,6 +17,8 @@ def parse_args():
     )
     parser.add_argument('--dataset', choices=['ECPD', 'ZOD'], required=True,
                         help='Dataset to analyze')
+    parser.add_argument('--force', action='store_true',
+                        help='Force reanalysis of all experiments, even if already in summaries')
     return parser.parse_args()
 
 def find_simulation_experiments(dataset_path):
@@ -320,6 +322,24 @@ def plot_simulation_roc_curves(exp_dir, plots_dir, experiment_name):
     except Exception as e:
         print(f"Warning: Error generating cycle ROC curves: {str(e)}")
 
+def load_existing_summaries(dataset_dir):
+    """Load existing simulation summaries if available"""
+    summaries_path = dataset_dir / 'simulation_summaries.csv'
+    if summaries_path.exists():
+        print(f"\nFound existing simulation summaries at {summaries_path}")
+        try:
+            summaries_df = pd.read_csv(summaries_path)
+            # Convert string-formatted numbers back to numeric
+            for col in ['total_instances', 'pruned_instances', 'true_positives', 
+                        'false_positives', 'true_negatives', 'false_negatives']:
+                if col in summaries_df.columns:
+                    summaries_df[col] = summaries_df[col].str.replace(',', '').astype(float)
+            return summaries_df
+        except Exception as e:
+            print(f"Error loading existing summaries: {str(e)}")
+            print("Will regenerate all summaries.")
+    return None
+
 def main():
     args = parse_args()
     
@@ -328,6 +348,13 @@ def main():
     dataset_dir = results_dir / args.dataset
     
     print(f"\nAnalyzing simulations for dataset: {args.dataset}")
+    
+    # Load existing summaries if available
+    existing_summaries = None if args.force else load_existing_summaries(dataset_dir)
+    existing_experiments = set()
+    if existing_summaries is not None and not existing_summaries.empty:
+        existing_experiments = set(existing_summaries['experiment'].tolist())
+        print(f"Found {len(existing_experiments)} already analyzed experiments")
     
     # Find experiments
     valid_experiments, skipped_experiments = find_simulation_experiments(dataset_dir)
@@ -338,12 +365,27 @@ def main():
     
     print(f"\nFound {len(valid_experiments)} valid experiments")
     
+    # Filter out already analyzed experiments
+    new_experiments = []
+    for exp_dir in valid_experiments:
+        if exp_dir.name in existing_experiments:
+            print(f"Skipping already analyzed experiment: {exp_dir.name}")
+        else:
+            new_experiments.append(exp_dir)
+    
+    if not new_experiments and existing_summaries is not None:
+        print("\nNo new experiments to analyze. Using existing summaries.")
+        format_and_save_results(existing_summaries, dataset_dir)
+        return
+    
+    print(f"\nWill analyze {len(new_experiments)} new experiments")
+    
     # Load gold standard data once
     full_data = load_gold_standard_data(args.dataset)
     
-    # Process each experiment
+    # Process each new experiment
     experiments_data = {}
-    for exp_dir in valid_experiments:
+    for exp_dir in new_experiments:
         print(f"\nProcessing experiment: {exp_dir.name}")
         
         # Create plots directory for this experiment
@@ -373,8 +415,20 @@ def main():
         except Exception as e:
             print(f"Warning: Error generating plots for {exp_dir.name}: {str(e)}")
     
-    # Create summary DataFrame
-    summary_df = create_summary_dataframe(experiments_data)
+    # Create summary DataFrame for new experiments
+    if experiments_data:
+        new_summary_df = create_summary_dataframe(experiments_data)
+        
+        # Merge with existing summaries if available
+        if existing_summaries is not None:
+            summary_df = pd.concat([existing_summaries, new_summary_df], ignore_index=True)
+            # Remove duplicates if any (keeping the newer ones)
+            summary_df = summary_df.drop_duplicates(subset=['experiment'], keep='last')
+        else:
+            summary_df = new_summary_df
+    else:
+        # If no new experiments were processed, use existing summaries
+        summary_df = existing_summaries
     
     # Save and display results
     format_and_save_results(summary_df, dataset_dir)

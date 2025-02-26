@@ -41,9 +41,10 @@ This project analyzes patterns of disagreement in image annotation tasks, using 
 pip install -r requirements.txt
 ```
 
-2. Install R and required packages:
+2. Install R and required packages (Note that you need to install the `Matrix` package first):
 ```R
-install.packages(c("lme4", "Matrix"))
+install.packages("Matrix")
+install.packages(c("lme4", "readr"))
 ```
 
 ## Data Preprocessing
